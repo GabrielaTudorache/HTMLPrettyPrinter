@@ -72,7 +72,8 @@ main() {
     local indent_level=0
 
     # read file, normalize whitespace, put each tag on its own line
-    cat "$file" \
+    # append an empty echo to ensure the last line is processed
+    { cat "$file"; echo ''; } \
         | tr '\n\r' '  ' \
         | sed 's/>[[:space:]]*</>\n</g' \
         | sed 's/>\([^<]\)/>\n\1/g' \
@@ -85,8 +86,17 @@ main() {
             line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
             [ -z "$line" ] && continue
 
+            if [[ "$line" =~ ^\<![Dd][Oo][Cc][Tt][Yy][Pp][Ee] ]]; then
+                # DOCTYPE - always print at indent level 0
+                echo "$line"
+            
+            elif [[ "$line" =~ ^\<!\-\- ]]; then
+                # HTML comment - print with current indent
+                print_indent $indent_level
+                echo "$line"
+            
             # check if it's a closing tag
-            if [[ "$line" =~ ^\</ ]]; then
+            elif [[ "$line" =~ ^\</ ]]; then
                 # closing tag - decrease indent first
                 ((indent_level--))
                 [ $indent_level -lt 0 ] && indent_level=0
