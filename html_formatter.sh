@@ -77,26 +77,34 @@ print_indent() {
 
 main() {
     if [ $# -lt 1 ]; then
-        echo "Usage: $0 <html_file>" >&2
+        echo "Usage: $0 <input_file> [stdout|inplace|newfile] [output_path]" >&2
         exit 1
     fi
 
     local file="$1"
+    local output_mode="${2:-stdout}"  # default to stdout
+    local output_file="${3:-}"
 
     if [ ! -f "$file" ]; then
         echo "Error: File '$file' not found" >&2
         exit 1
     fi
 
+    if [[ "$output_mode" == "newfile" && -z "$output_file" ]]; then
+        echo "Error: newfile mode requires an output path" >&2
+        exit 1
+    fi
+
     local indent_level=0
     local in_raw_element=false
     local raw_tag_name=""
+    local output=""
 
     # read file, normalize whitespace, put each tag on its own line, add empty echo to ensure the last line is processed
-    { cat "$file"; } \
+    output=$({ cat "$file"; } \
         | tr '\n\r' '  ' \
         | sed 's/>[[:space:]]*</>\n</g' \
-        | sed 's/\([^>]\)</\1\n</g' \
+        | sed 's/\([^>]\)<\([a-zA-Z/!]\)/\1\n<\2/g' \
         | { cat; printf '\n'; } \
         | while IFS= read -r line; do
             # skip empty lines
@@ -153,11 +161,8 @@ main() {
                 # extract tag name
                 local tag_name=$(get_tag_name "$tag_part")
                 
-                if [[ "$tag_part" =~ /\>$ ]]; then
-                    # self-closing tag, don't increase indent
-                    :
-                elif is_void_element "$tag_name"; then
-                    # void element, don't increase indent
+                if [[ "$tag_part" =~ /\>$ ]] || is_void_element "$tag_name"; then
+                    # self-closing or void element - don't increase indent
                     :
                 elif is_raw_element "$tag_name"; then
                     # raw element - increase indent and track state
@@ -179,7 +184,22 @@ main() {
                 print_indent $indent_level
                 echo "$line"
             fi
-        done
+        done)
+
+    # output the result based on mode
+    case "$output_mode" in
+        stdout)
+            echo "$output"
+            ;;
+        inplace)
+            echo "$output" > "$file"
+            echo "Formatted output written to '$file'" >&2
+            ;;
+        newfile)
+            echo "$output" > "$output_file"
+            echo "Formatted output written to '$output_file'" >&2
+            ;;
+    esac
 }
 
 main "$@"
