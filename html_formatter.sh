@@ -99,14 +99,66 @@ main() {
     local in_raw_element=false
     local raw_tag_name=""
     local output=""
+    # tag stack for tracking open tags (stored as colon-separated string for subshell compatibility)
+    local tag_stack=""
+
+    # helper to push to stack
+    stack_push() {
+        if [[ -z "$tag_stack" ]]; then
+            tag_stack="$1"
+        else
+            tag_stack="$tag_stack:$1"
+        fi
+    }
+
+    # helper to pop from stack
+    stack_pop() {
+        local top="${tag_stack##*:}"
+        if [[ "$tag_stack" == *:* ]]; then
+            tag_stack="${tag_stack%:*}"
+        else
+            tag_stack=""
+        fi
+    }
+
+    # helper to get top of stack
+    stack_top() {
+        echo "${tag_stack##*:}"
+    }
+
+    # helper to check if tag exists in stack
+    stack_contains() {
+        local needle="$1"
+        [[ ":$tag_stack:" == *":$needle:"* ]]
+    }
+
+    # helper to check if stack is empty
+    stack_empty() {
+        [[ -z "$tag_stack" ]]
+    }
 
     # read file, normalize whitespace, put each tag on its own line, add empty echo to ensure the last line is processed
     output=$({ cat "$file"; } \
         | tr '\n\r' '  ' \
         | sed 's/>[[:space:]]*</>\n</g' \
         | sed 's/\([^>]\)<\([a-zA-Z/!]\)/\1\n<\2/g' \
-        | { cat; printf '\n'; } \
+        | { cat; printf '\n'; printf 'EOF_MARKER\n'; } \
         | while IFS= read -r line; do
+            # check for end marker to close remaining tags
+            if [[ "$line" == "EOF_MARKER" ]]; then
+                # close any remaining unclosed tags
+                while ! stack_empty; do
+                    local unclosed_tag=$(stack_top)
+                    ((indent_level--))
+                    [ $indent_level -lt 0 ] && indent_level=0
+                    print_indent $indent_level
+                    echo "</$unclosed_tag>"
+                    echo "Warning: Auto-closing unclosed <$unclosed_tag> tag" >&2
+                    stack_pop
+                done
+                continue
+            fi
+
             # skip empty lines
             [ -z "$line" ] && continue
 
@@ -124,6 +176,7 @@ main() {
                     echo "$line"
                     in_raw_element=false
                     raw_tag_name=""
+                    stack_pop
                 else
                     # raw content - print with current indent
                     print_indent $indent_level
@@ -143,11 +196,31 @@ main() {
             
             # check if it's a closing tag
             elif [[ "$line" =~ ^\</ ]]; then
-                # closing tag - decrease indent first
-                ((indent_level--))
-                [ $indent_level -lt 0 ] && indent_level=0
-                print_indent $indent_level
-                echo "$line"
+                local tag_name=$(get_tag_name "$line")
+                
+                # check if this closing tag has a matching opening tag
+                if stack_contains "$tag_name"; then
+                    # close any mismatched tags first
+                    while ! stack_empty && [[ "$(stack_top)" != "$tag_name" ]]; do
+                        local mismatched_tag=$(stack_top)
+                        ((indent_level--))
+                        [ $indent_level -lt 0 ] && indent_level=0
+                        print_indent $indent_level
+                        echo "</$mismatched_tag>"
+                        echo "Warning: Auto-closing mismatched <$mismatched_tag> tag" >&2
+                        stack_pop
+                    done
+                    
+                    # now close the matching tag
+                    ((indent_level--))
+                    [ $indent_level -lt 0 ] && indent_level=0
+                    print_indent $indent_level
+                    echo "$line"
+                    stack_pop
+                else
+                    # orphan closing tag - skip it and warn
+                    echo "Warning: Removing orphan closing tag </$tag_name>" >&2
+                fi
             # check if it's an opening tag
             elif [[ "$line" =~ ^\< ]]; then
                 # extract tag and any text after it
@@ -169,9 +242,11 @@ main() {
                     ((indent_level++))
                     in_raw_element=true
                     raw_tag_name="$tag_name"
+                    stack_push "$tag_name"
                 else
-                    # regular opening tag, increase indent
+                    # regular opening tag, increase indent and push to stack
                     ((indent_level++))
+                    stack_push "$tag_name"
                 fi
                 
                 # print text content if any
